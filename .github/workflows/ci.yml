@@ -32,5 +32,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: model-artifacts
+          name: outputs
           path: MLProject/outputs/

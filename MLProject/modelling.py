@@ -91,6 +91,23 @@ def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
     )
 
 
+def start_mlflow_run(experiment_name: str):
+    """
+    FIX untuk MLflow Projects:
+    - kalau jalan lewat `mlflow run`, MLflow sudah bikin run_id dan set env MLFLOW_RUN_ID.
+      Jadi kita HARUS attach ke run itu, bukan bikin run baru.
+    """
+    run_id = os.getenv("MLFLOW_RUN_ID", "").strip()
+
+    if run_id:
+        # attach ke run dari mlflow projects
+        return mlflow.start_run(run_id=run_id)
+    else:
+        # jalan manual (python modelling.py ...)
+        mlflow.set_experiment(experiment_name)
+        return mlflow.start_run(run_name="baseline_model")
+
+
 def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     data_path = str(data_path)
     out_dir = Path(out_dir)
@@ -102,7 +119,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     else:
         dataset_path = data_path
 
-    # load dataset
     df = load_df(dataset_path)
 
     # resolve target col (math_score -> math score)
@@ -129,7 +145,9 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     num_cols = [c for c in X.columns if c not in cat_cols]
 
-    numeric_transformer = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
+    numeric_transformer = Pipeline(
+        steps=[("imputer", SimpleImputer(strategy="median"))]
+    )
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -152,22 +170,11 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    # =========================
-    # MLflow (AMAN BUAT mlflow run / CI)
-    # =========================
-    # Kalau jalan via `mlflow run .`, MLflow Projects biasanya udah bikin active run.
-    # Jadi jangan bikin run baru yang bikin conflict, cukup reuse active run.
-
-    mlflow.set_experiment(experiment_name)
+    # MLflow autolog
     mlflow.sklearn.autolog(log_models=True)
 
-    active = mlflow.active_run()
-    if active is None:
-        run_ctx = mlflow.start_run(run_name="baseline_model")
-    else:
-        run_ctx = mlflow.start_run(run_id=active.info.run_id)
-
-    with run_ctx:
+    # >>> FIX UTAMA ADA DI SINI <<<
+    with start_mlflow_run(experiment_name):
         mlflow.log_param("dataset_file", str(Path(dataset_path).name))
         mlflow.log_param("target_col", target_col)
         mlflow.log_param("problem_type", problem_type)
@@ -186,7 +193,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
             mlflow.log_metric("recall_weighted_manual", float(rec))
             mlflow.log_metric("f1_weighted_manual", float(f1))
 
-            # AUC hanya untuk binary + ada predict_proba
             if hasattr(pipeline.named_steps["model"], "predict_proba") and y_test.nunique() == 2:
                 proba = pipeline.predict_proba(X_test)[:, 1]
                 try:
@@ -194,25 +200,25 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
                     mlflow.log_metric("roc_auc_manual", float(auc))
                 except Exception:
                     pass
-
         else:
-            rmse = np.sqrt(mean_squared_error(y_test, preds))
-            mae = mean_absolute_error(y_test, preds)
-            r2 = r2_score(y_test, preds)
+            rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
+            mae = float(mean_absolute_error(y_test, preds))
+            r2 = float(r2_score(y_test, preds))
 
-            mlflow.log_metric("rmse_manual", float(rmse))
-            mlflow.log_metric("mae_manual", float(mae))
-            mlflow.log_metric("r2_manual", float(r2))
+            mlflow.log_metric("rmse_manual", rmse)
+            mlflow.log_metric("mae_manual", mae)
+            mlflow.log_metric("r2_manual", r2)
 
-        # Save model artifact into out_dir
         model_path = out_dir / "model_pipeline.joblib"
         joblib.dump(pipeline, model_path)
         mlflow.log_artifact(str(model_path))
 
-        # save metrics file buat artifact CI
         metrics_path = out_dir / "metrics.txt"
         with open(metrics_path, "w", encoding="utf-8") as f:
             f.write(f"problem_type={problem_type}\n")
+            f.write(f"target_col={target_col}\n")
+
+        mlflow.log_artifact(str(metrics_path))
 
     print("Selesai training + logging ke MLflow.")
     print("Jalankan MLflow UI: mlflow ui --port 5000")
@@ -224,9 +230,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="namadataset_preprocessing")
     parser.add_argument("--out_dir", type=str, default="outputs")
-
-    # default aman kalau lupa ngisi
-    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math_score").strip())
+    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
     parser.add_argument("--experiment_name", type=str, default="kriteria3_workflow_ci")
 
     args = parser.parse_args()

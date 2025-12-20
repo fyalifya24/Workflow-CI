@@ -70,45 +70,46 @@ def detect_problem_type(y: pd.Series) -> str:
     return "regression"
 
 
-def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
-    data_path = str(data_path)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # load dataset
-    if Path(data_path).is_dir():
-        dataset_path = find_dataset_file(data_path)
-    else:
-        dataset_path = data_path
-
-        df = load_df(dataset_path)
-
-        # --- normalize target col ---
-        target_col_raw = target_col
-
-        candidates = [
+def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
+    # kandidat nama kolom yang mungkin (spasi vs underscore)
+    candidates = [
         target_col_raw,
         target_col_raw.replace("_", " "),
         target_col_raw.replace(" ", "_"),
         target_col_raw.strip(),
         target_col_raw.strip().replace("_", " "),
-        ]
+        target_col_raw.strip().replace(" ", "_"),
+    ]
 
-        found = None
-            for c in candidates:
-                if c in df.columns:
-                    found = c
-                      break
+    for c in candidates:
+        if c in df.columns:
+            print(f"[INFO] target_col resolved: '{target_col_raw}' -> '{c}'")
+            return c
 
-        if found is None:
-            raise ValueError(
-                f"Kolom target '{target_col_raw}' tidak ditemukan.\n"
-                f"Kolom yang ada: {list(df.columns)}"
-             )
+    raise ValueError(
+        f"Kolom target '{target_col_raw}' tidak ditemukan.\n"
+        f"Kolom yang ada: {list(df.columns)}"
+    )
 
-        target_col = found
-        print(f"[INFO] target_col resolved: '{target_col_raw}' -> '{target_col}'")
 
+def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
+    data_path = str(data_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # tentuin dataset_path
+    if Path(data_path).is_dir():
+        dataset_path = find_dataset_file(data_path)
+    else:
+        dataset_path = data_path
+
+    # load dataset (INI HARUS DI LUAR IF/ELSE DI ATAS)
+    df = load_df(dataset_path)
+
+    # normalize / resolve target col (math_score -> math score)
+    target_col = resolve_target_column(df, target_col)
+
+    # drop null target
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
 
     X = df.drop(columns=[target_col])
@@ -129,9 +130,7 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     num_cols = [c for c in X.columns if c not in cat_cols]
 
-    numeric_transformer = Pipeline(
-        steps=[("imputer", SimpleImputer(strategy="median"))]
-    )
+    numeric_transformer = Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))])
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -177,7 +176,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
             mlflow.log_metric("recall_weighted_manual", float(rec))
             mlflow.log_metric("f1_weighted_manual", float(f1))
 
-            # AUC only for binary + predict_proba exists
             if hasattr(pipeline.named_steps["model"], "predict_proba") and y_test.nunique() == 2:
                 proba = pipeline.predict_proba(X_test)[:, 1]
                 try:
@@ -185,7 +183,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
                     mlflow.log_metric("roc_auc_manual", float(auc))
                 except Exception:
                     pass
-
         else:
             rmse = np.sqrt(mean_squared_error(y_test, preds))
             mae = mean_absolute_error(y_test, preds)
@@ -195,12 +192,10 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
             mlflow.log_metric("mae_manual", float(mae))
             mlflow.log_metric("r2_manual", float(r2))
 
-        # Save model artifact into out_dir
         model_path = out_dir / "model_pipeline.joblib"
         joblib.dump(pipeline, model_path)
         mlflow.log_artifact(str(model_path))
 
-        # Also save a tiny metrics file for CI artifact
         metrics_path = out_dir / "metrics.txt"
         with open(metrics_path, "w", encoding="utf-8") as f:
             f.write(f"problem_type={problem_type}\n")
@@ -216,8 +211,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="namadataset_preprocessing")
     parser.add_argument("--out_dir", type=str, default="outputs")
 
-    # target_col: biar fleksibel (nggak wajib env var)
-    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "").strip())
+    # fallback default biar ga error kalau lupa isi
+    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
     parser.add_argument("--experiment_name", type=str, default="kriteria3_workflow_ci")
 
     args = parser.parse_args()

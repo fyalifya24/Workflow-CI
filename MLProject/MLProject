@@ -1,0 +1,15 @@
+name: workflow_ci_training
+
+conda_env: conda.yaml
+
+entry_points:
+  main:
+    parameters:
+      data_path: {type: path, default: .}
+      out_dir: {type: path, default: outputs}
+      target_col: {type: string, default: math_score}
+    command: >
+      python modelling.py
+      --data_path {data_path}
+      --out_dir {out_dir}
+      --target_col {target_col}

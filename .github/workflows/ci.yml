@@ -1,0 +1,36 @@
+name: CI - Retrain with MLflow Project
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: mlflow-env        # 🔥 HARUS SAMA DENGAN conda.yaml
+          environment-file: MLProject/conda.yaml
+          auto-activate-base: false
+
+      - name: Run MLflow Project (Training)
+        shell: bash -l {0}
+        run: |
+          cd MLProject
+          mlflow run . -e main \
+            -P data_path=. \
+            -P out_dir=outputs \
+            -P target_col=math_score
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: MLProject/outputs/

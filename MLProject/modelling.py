@@ -1,0 +1,218 @@
+import argparse
+import glob
+import os
+import warnings
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+
+import mlflow
+import mlflow.sklearn
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestRegressor
+
+warnings.filterwarnings("ignore")
+
+
+def find_dataset_file(data_dir: str) -> str:
+    patterns = ["*.csv", "*.parquet", "*.pkl", "*.pickle"]
+    files = []
+    for p in patterns:
+        files.extend(glob.glob(str(Path(data_dir) / p)))
+
+    if not files:
+        raise FileNotFoundError(
+            f"Tidak ada file dataset di '{data_dir}'. "
+            f"Pastikan folder ini berisi hasil preprocessing (csv/parquet/pkl)."
+        )
+
+    return sorted(files)[0]
+
+
+def load_df(file_path: str) -> pd.DataFrame:
+    fp = file_path.lower()
+    if fp.endswith(".csv"):
+        return pd.read_csv(file_path)
+    if fp.endswith(".parquet"):
+        return pd.read_parquet(file_path)
+    if fp.endswith(".pkl") or fp.endswith(".pickle"):
+        return pd.read_pickle(file_path)
+    raise ValueError(f"Format file tidak didukung: {file_path}")
+
+
+def detect_problem_type(y: pd.Series) -> str:
+    if y.dtype == "bool":
+        return "classification"
+    if str(y.dtype) in ["object", "category"]:
+        return "classification"
+
+    nunique = y.nunique(dropna=True)
+    if nunique <= 20:
+        return "classification"
+    return "regression"
+
+
+def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
+    data_path = str(data_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # load dataset
+    if Path(data_path).is_dir():
+        dataset_path = find_dataset_file(data_path)
+    else:
+        dataset_path = data_path
+
+    df = load_df(dataset_path)
+
+    if target_col not in df.columns:
+        raise ValueError(
+            f"Kolom target '{target_col}' tidak ditemukan.\n"
+            f"Kolom yang ada: {list(df.columns)}"
+        )
+
+    df = df.dropna(subset=[target_col]).reset_index(drop=True)
+
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+
+    # bool -> int
+    bool_cols = X.select_dtypes(include=["bool"]).columns
+    if len(bool_cols) > 0:
+        X[bool_cols] = X[bool_cols].astype(int)
+
+    problem_type = detect_problem_type(y)
+    stratify = y if problem_type == "classification" and y.nunique() > 1 else None
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=stratify
+    )
+
+    cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    num_cols = [c for c in X.columns if c not in cat_cols]
+
+    numeric_transformer = Pipeline(
+        steps=[("imputer", SimpleImputer(strategy="median"))]
+    )
+    categorical_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, num_cols),
+            ("cat", categorical_transformer, cat_cols),
+        ],
+        remainder="drop",
+    )
+
+    if problem_type == "classification":
+        model = LogisticRegression(max_iter=1000)
+    else:
+        model = RandomForestRegressor(n_estimators=200, random_state=42)
+
+    pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+
+    # MLflow
+    mlflow.set_experiment(experiment_name)
+    mlflow.sklearn.autolog(log_models=True)
+
+    with mlflow.start_run(run_name="baseline_model"):
+        mlflow.log_param("dataset_file", str(Path(dataset_path).name))
+        mlflow.log_param("target_col", target_col)
+        mlflow.log_param("problem_type", problem_type)
+
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
+
+        if problem_type == "classification":
+            acc = accuracy_score(y_test, preds)
+            prec = precision_score(y_test, preds, average="weighted", zero_division=0)
+            rec = recall_score(y_test, preds, average="weighted", zero_division=0)
+            f1 = f1_score(y_test, preds, average="weighted", zero_division=0)
+
+            mlflow.log_metric("accuracy_manual", float(acc))
+            mlflow.log_metric("precision_weighted_manual", float(prec))
+            mlflow.log_metric("recall_weighted_manual", float(rec))
+            mlflow.log_metric("f1_weighted_manual", float(f1))
+
+            # AUC only for binary + predict_proba exists
+            if hasattr(pipeline.named_steps["model"], "predict_proba") and y_test.nunique() == 2:
+                proba = pipeline.predict_proba(X_test)[:, 1]
+                try:
+                    auc = roc_auc_score(y_test, proba)
+                    mlflow.log_metric("roc_auc_manual", float(auc))
+                except Exception:
+                    pass
+
+        else:
+            rmse = np.sqrt(mean_squared_error(y_test, preds))
+            mae = mean_absolute_error(y_test, preds)
+            r2 = r2_score(y_test, preds)
+
+            mlflow.log_metric("rmse_manual", float(rmse))
+            mlflow.log_metric("mae_manual", float(mae))
+            mlflow.log_metric("r2_manual", float(r2))
+
+        # Save model artifact into out_dir
+        model_path = out_dir / "model_pipeline.joblib"
+        joblib.dump(pipeline, model_path)
+        mlflow.log_artifact(str(model_path))
+
+        # Also save a tiny metrics file for CI artifact
+        metrics_path = out_dir / "metrics.txt"
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            f.write(f"problem_type={problem_type}\n")
+
+    print("Selesai training + logging ke MLflow.")
+    print("Jalankan MLflow UI: mlflow ui --port 5000")
+    print("Terus buka: http://127.0.0.1:5000")
+    print(f"Output tersimpan di: {out_dir.resolve()}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", type=str, default="namadataset_preprocessing")
+    parser.add_argument("--out_dir", type=str, default="outputs")
+
+    # target_col: biar fleksibel (nggak wajib env var)
+    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "").strip())
+    parser.add_argument("--experiment_name", type=str, default="kriteria3_workflow_ci")
+
+    args = parser.parse_args()
+
+    if not args.target_col:
+        raise ValueError(
+            "TARGET belum ditentukan.\n"
+            "Pilih salah satu:\n"
+            "1) set env var: TARGET_COL=nama_kolom_target\n"
+            "2) atau jalankan dengan argumen: --target_col nama_kolom_target"
+        )
+
+    main(
+        data_path=args.data_path,
+        out_dir=args.out_dir,
+        target_col=args.target_col,
+        experiment_name=args.experiment_name,
+    )

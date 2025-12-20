@@ -81,13 +81,33 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     else:
         dataset_path = data_path
 
-    df = load_df(dataset_path)
+        df = load_df(dataset_path)
 
-    if target_col not in df.columns:
-        raise ValueError(
-            f"Kolom target '{target_col}' tidak ditemukan.\n"
-            f"Kolom yang ada: {list(df.columns)}"
-        )
+        # --- normalize target col ---
+        target_col_raw = target_col
+
+        candidates = [
+        target_col_raw,
+        target_col_raw.replace("_", " "),
+        target_col_raw.replace(" ", "_"),
+        target_col_raw.strip(),
+        target_col_raw.strip().replace("_", " "),
+        ]
+
+        found = None
+            for c in candidates:
+                if c in df.columns:
+                    found = c
+                      break
+
+        if found is None:
+            raise ValueError(
+                f"Kolom target '{target_col_raw}' tidak ditemukan.\n"
+                f"Kolom yang ada: {list(df.columns)}"
+             )
+
+        target_col = found
+        print(f"[INFO] target_col resolved: '{target_col_raw}' -> '{target_col}'")
 
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
 

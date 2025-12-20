@@ -170,14 +170,16 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    # MLflow autolog
-    mlflow.sklearn.autolog(log_models=True)
+    # MLflow autolog - TAMBAHKAN exclusive=True untuk hindari konflik
+    mlflow.sklearn.autolog(log_models=True, exclusive=True)
 
-    # >>> FIX UTAMA ADA DI SINI <<<
+    # >>> PERBAIKAN UTAMA DI SINI: HAPUS mlflow.log_param yang duplicate <<<
     with start_mlflow_run(experiment_name):
-        mlflow.log_param("dataset_file", str(Path(dataset_path).name))
-        mlflow.log_param("target_col", target_col)
-        mlflow.log_param("problem_type", problem_type)
+        # GANTI mlflow.log_param dengan mlflow.set_tag untuk info tambahan
+        mlflow.set_tag("dataset_file", str(Path(dataset_path).name))
+        mlflow.set_tag("target_col_resolved", target_col)
+        mlflow.set_tag("problem_type", problem_type)
+        mlflow.set_tag("model_type", type(model).__name__)
 
         pipeline.fit(X_train, y_train)
         preds = pipeline.predict(X_test)
@@ -217,13 +219,23 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
         with open(metrics_path, "w", encoding="utf-8") as f:
             f.write(f"problem_type={problem_type}\n")
             f.write(f"target_col={target_col}\n")
+            f.write(f"train_samples={len(X_train)}\n")
+            f.write(f"test_samples={len(X_test)}\n")
+            if problem_type == "regression":
+                f.write(f"rmse={rmse:.4f}\n")
+                f.write(f"mae={mae:.4f}\n")
+                f.write(f"r2={r2:.4f}\n")
+            else:
+                f.write(f"accuracy={acc:.4f}\n")
+                f.write(f"f1_weighted={f1:.4f}\n")
 
         mlflow.log_artifact(str(metrics_path))
 
+    print("=" * 50)
     print("Selesai training + logging ke MLflow.")
-    print("Jalankan MLflow UI: mlflow ui --port 5000")
-    print("Terus buka: http://127.0.0.1:5000")
+    print(f"Run ID: {mlflow.active_run().info.run_id}")
     print(f"Output tersimpan di: {out_dir.resolve()}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

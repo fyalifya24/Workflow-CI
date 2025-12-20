@@ -71,7 +71,6 @@ def detect_problem_type(y: pd.Series) -> str:
 
 
 def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
-    # kandidat nama kolom yang mungkin (spasi vs underscore)
     candidates = [
         target_col_raw,
         target_col_raw.replace("_", " "),
@@ -103,10 +102,10 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     else:
         dataset_path = data_path
 
-    # load dataset (INI HARUS DI LUAR IF/ELSE DI ATAS)
+    # load dataset
     df = load_df(dataset_path)
 
-    # normalize / resolve target col (math_score -> math score)
+    # resolve target col (math_score -> math score)
     target_col = resolve_target_column(df, target_col)
 
     # drop null target
@@ -153,11 +152,22 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    # MLflow
+    # =========================
+    # MLflow (AMAN BUAT mlflow run / CI)
+    # =========================
+    # Kalau jalan via `mlflow run .`, MLflow Projects biasanya udah bikin active run.
+    # Jadi jangan bikin run baru yang bikin conflict, cukup reuse active run.
+
     mlflow.set_experiment(experiment_name)
     mlflow.sklearn.autolog(log_models=True)
 
-    with mlflow.start_run(run_name="baseline_model"):
+    active = mlflow.active_run()
+    if active is None:
+        run_ctx = mlflow.start_run(run_name="baseline_model")
+    else:
+        run_ctx = mlflow.start_run(run_id=active.info.run_id)
+
+    with run_ctx:
         mlflow.log_param("dataset_file", str(Path(dataset_path).name))
         mlflow.log_param("target_col", target_col)
         mlflow.log_param("problem_type", problem_type)
@@ -176,6 +186,7 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
             mlflow.log_metric("recall_weighted_manual", float(rec))
             mlflow.log_metric("f1_weighted_manual", float(f1))
 
+            # AUC hanya untuk binary + ada predict_proba
             if hasattr(pipeline.named_steps["model"], "predict_proba") and y_test.nunique() == 2:
                 proba = pipeline.predict_proba(X_test)[:, 1]
                 try:
@@ -183,6 +194,7 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
                     mlflow.log_metric("roc_auc_manual", float(auc))
                 except Exception:
                     pass
+
         else:
             rmse = np.sqrt(mean_squared_error(y_test, preds))
             mae = mean_absolute_error(y_test, preds)
@@ -192,10 +204,12 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
             mlflow.log_metric("mae_manual", float(mae))
             mlflow.log_metric("r2_manual", float(r2))
 
+        # Save model artifact into out_dir
         model_path = out_dir / "model_pipeline.joblib"
         joblib.dump(pipeline, model_path)
         mlflow.log_artifact(str(model_path))
 
+        # save metrics file buat artifact CI
         metrics_path = out_dir / "metrics.txt"
         with open(metrics_path, "w", encoding="utf-8") as f:
             f.write(f"problem_type={problem_type}\n")
@@ -211,8 +225,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="namadataset_preprocessing")
     parser.add_argument("--out_dir", type=str, default="outputs")
 
-    # fallback default biar ga error kalau lupa isi
-    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
+    # default aman kalau lupa ngisi
+    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math_score").strip())
     parser.add_argument("--experiment_name", type=str, default="kriteria3_workflow_ci")
 
     args = parser.parse_args()

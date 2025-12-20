@@ -7,5 +7,5 @@ entry_points:
     parameters:
       data_path: {type: path, default: .}
       out_dir: {type: string, default: outputs}
-      target_col: {type: string, default: math_score}
+      target_col: {type: string, default: "math score"}
     command: "python modelling.py --data_path {data_path} --out_dir {out_dir} --target_col {target_col}"

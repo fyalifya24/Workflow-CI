@@ -38,7 +38,6 @@ def find_dataset_file(data_dir: str) -> str:
         for p in patterns:
             files.extend(glob.glob(p))
 
-    # Coba prioritas nama file yang sering dipakai
     preferred = [
         "students_performance_preprocessing.csv",
         "students_performance_preprocessing.parquet",
@@ -86,7 +85,6 @@ def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
         raw.lower().replace(" ", "_"),
     ]
 
-    # mapping kolom ke lowercase untuk pencocokan aman
     cols_lower_map = {c.lower(): c for c in df.columns}
 
     for c in candidates:
@@ -131,11 +129,9 @@ def get_or_create_run(experiment_name: str):
     """
     run_id = os.getenv("MLFLOW_RUN_ID", "").strip()
 
-    # CI / mlflow run
     if run_id:
         return mlflow.start_run(run_id=run_id)
 
-    # local biasa
     mlflow.set_experiment(experiment_name)
     return mlflow.start_run(run_name="baseline_model")
 
@@ -144,7 +140,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # tentuin dataset_path
     p = Path(data_path)
     if p.exists() and p.is_dir():
         dataset_path = find_dataset_file(str(p))
@@ -156,10 +151,8 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     print(f"[INFO] Dataset shape: {df.shape}")
     print(f"[INFO] Columns: {list(df.columns)}")
 
-    # resolve target col
     target_col = resolve_target_column(df, target_col)
 
-    # drop null target
     before = len(df)
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
     print(f"[INFO] Dropped {before - len(df)} rows with null target")
@@ -167,7 +160,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     X = df.drop(columns=[target_col])
     y = df[target_col]
 
-    # bool -> int (biar aman kalau ada bool di fitur)
     bool_cols = X.select_dtypes(include=["bool"]).columns
     if len(bool_cols) > 0:
         X[bool_cols] = X[bool_cols].astype(int)
@@ -214,8 +206,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    # ✅ Kriteria 2: AUTLOG UMUM
-    # ❌ Tidak ada logging manual (log_param/log_metric/log_artifact/set_tag)
     mlflow.autolog()
 
     with get_or_create_run(experiment_name):
@@ -223,7 +213,6 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
         pipeline.fit(X_train, y_train)
         print("[INFO] Training completed.")
 
-        # Simpan model ke folder output (bukan logging MLflow manual)
         model_path = out_dir / "model_pipeline.joblib"
         joblib.dump(pipeline, model_path)
         print(f"[INFO] Model saved: {model_path}")

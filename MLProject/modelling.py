@@ -22,10 +22,6 @@ warnings.filterwarnings("ignore")
 
 
 def find_dataset_file(data_dir: str) -> str:
-    """
-    Cari file dataset (csv/parquet/pkl/pickle) di folder data_dir.
-    Kalau kosong, fallback cari di current working directory.
-    """
     patterns = ["*.csv", "*.parquet", "*.pkl", "*.pickle"]
     files = []
 
@@ -71,9 +67,6 @@ def load_df(file_path: str) -> pd.DataFrame:
 
 
 def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
-    """
-    Normalisasi nama target (math_score <-> math score), strip, dll.
-    """
     raw = (target_col_raw or "").strip()
 
     candidates = [
@@ -103,12 +96,6 @@ def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
 
 
 def detect_problem_type(y: pd.Series) -> str:
-    """
-    Heuristik sederhana:
-    - bool/object/category => classification
-    - numeric dengan unique <= 20 => classification
-    - sisanya regression
-    """
     if y.dtype == "bool":
         return "classification"
     if str(y.dtype) in ["object", "category"]:
@@ -118,22 +105,6 @@ def detect_problem_type(y: pd.Series) -> str:
     if nunique <= 20:
         return "classification"
     return "regression"
-
-
-def get_or_create_run(experiment_name: str):
-    """
-    Aman untuk:
-    - MLflow Projects/CI (`mlflow run`): MLflow sudah bikin run & set MLFLOW_RUN_ID.
-      => kita resume run itu (biar gak bentrok experiment).
-    - Local run (python modelling.py): kita set experiment & start run sendiri.
-    """
-    run_id = os.getenv("MLFLOW_RUN_ID", "").strip()
-
-    if run_id:
-        return mlflow.start_run(run_id=run_id)
-
-    mlflow.set_experiment(experiment_name)
-    return mlflow.start_run(run_name="baseline_model")
 
 
 def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
@@ -206,16 +177,16 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
+    mlflow.set_experiment(experiment_name) 
     mlflow.autolog()
 
-    with get_or_create_run(experiment_name):
-        print("[INFO] Training started...")
-        pipeline.fit(X_train, y_train)
-        print("[INFO] Training completed.")
+    print("[INFO] Training started...")
+    pipeline.fit(X_train, y_train)
+    print("[INFO] Training completed.")
 
-        model_path = out_dir / "model_pipeline.joblib"
-        joblib.dump(pipeline, model_path)
-        print(f"[INFO] Model saved: {model_path}")
+    model_path = out_dir / "model_pipeline.joblib"
+    joblib.dump(pipeline, model_path)
+    print(f"[INFO] Model saved: {model_path}")
 
     print("Selesai training + autolog ke MLflow.")
     print("Jalankan MLflow UI: mlflow ui --port 5000")
@@ -229,7 +200,6 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, default="outputs")
     parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
     parser.add_argument("--experiment_name", type=str, default="kriteria2_basic_modelling")
-
     args = parser.parse_args()
 
     if not args.target_col:

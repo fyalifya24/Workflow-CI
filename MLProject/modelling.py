@@ -2,7 +2,6 @@ import argparse
 import glob
 import os
 import warnings
-from contextlib import nullcontext
 from pathlib import Path
 
 import joblib
@@ -24,8 +23,8 @@ warnings.filterwarnings("ignore")
 
 def find_dataset_file(data_dir: str) -> str:
     """
-    Cari file dataset hasil preprocessing (csv/parquet/pkl/pickle).
-    Prioritas: file di folder data_dir, kalau kosong baru fallback ke current directory.
+    Cari file dataset (csv/parquet/pkl/pickle) di folder data_dir.
+    Kalau kosong, fallback cari di current working directory.
     """
     patterns = ["*.csv", "*.parquet", "*.pkl", "*.pickle"]
     files = []
@@ -36,14 +35,26 @@ def find_dataset_file(data_dir: str) -> str:
             files.extend(glob.glob(str(search_dir / p)))
 
     if not files:
-        # fallback: current directory (kadang CI taro file di root project)
         for p in patterns:
             files.extend(glob.glob(p))
 
+    # Coba prioritas nama file yang sering dipakai
+    preferred = [
+        "students_performance_preprocessing.csv",
+        "students_performance_preprocessing.parquet",
+        "students_performance_preprocessing.pkl",
+        "students_performance_preprocessing.pickle",
+    ]
+    for f in preferred:
+        if (search_dir / f).exists():
+            return str(search_dir / f)
+        if Path(f).exists():
+            return str(Path(f))
+
     if not files:
         raise FileNotFoundError(
-            f"Tidak ada file dataset di '{data_dir}' maupun current directory.\n"
-            f"Pastikan ada file preprocessing (csv/parquet/pkl/pickle)."
+            f"Tidak ada file dataset ditemukan.\n"
+            f"Pastikan ada file preprocessing (.csv/.parquet/.pkl/.pickle) di '{data_dir}' atau root project."
         )
 
     return sorted(files)[0]
@@ -64,19 +75,28 @@ def resolve_target_column(df: pd.DataFrame, target_col_raw: str) -> str:
     """
     Normalisasi nama target (math_score <-> math score), strip, dll.
     """
+    raw = (target_col_raw or "").strip()
+
     candidates = [
-        target_col_raw,
-        target_col_raw.replace("_", " "),
-        target_col_raw.replace(" ", "_"),
-        target_col_raw.strip(),
-        target_col_raw.strip().replace("_", " "),
-        target_col_raw.strip().replace(" ", "_"),
+        raw,
+        raw.replace("_", " "),
+        raw.replace(" ", "_"),
+        raw.lower(),
+        raw.lower().replace("_", " "),
+        raw.lower().replace(" ", "_"),
     ]
+
+    # mapping kolom ke lowercase untuk pencocokan aman
+    cols_lower_map = {c.lower(): c for c in df.columns}
 
     for c in candidates:
         if c in df.columns:
             print(f"[INFO] target_col resolved: '{target_col_raw}' -> '{c}'")
             return c
+        if c.lower() in cols_lower_map:
+            real = cols_lower_map[c.lower()]
+            print(f"[INFO] target_col resolved: '{target_col_raw}' -> '{real}'")
+            return real
 
     raise ValueError(
         f"Kolom target '{target_col_raw}' tidak ditemukan.\n"
@@ -105,15 +125,17 @@ def detect_problem_type(y: pd.Series) -> str:
 def get_or_create_run(experiment_name: str):
     """
     Aman untuk:
-    - MLflow Projects/CI: biasanya sudah ada active run -> kita pakai itu.
-    - Local run: kita buat run baru.
+    - MLflow Projects/CI (`mlflow run`): MLflow sudah bikin run & set MLFLOW_RUN_ID.
+      => kita resume run itu (biar gak bentrok experiment).
+    - Local run (python modelling.py): kita set experiment & start run sendiri.
     """
-    active = mlflow.active_run()
-    if active is not None:
-        # Run sudah aktif (misalnya dari `mlflow run`)
-        return nullcontext(active)
+    run_id = os.getenv("MLFLOW_RUN_ID", "").strip()
 
-    # Kalau belum ada run, baru set experiment & start run sendiri
+    # CI / mlflow run
+    if run_id:
+        return mlflow.start_run(run_id=run_id)
+
+    # local biasa
     mlflow.set_experiment(experiment_name)
     return mlflow.start_run(run_name="baseline_model")
 
@@ -123,14 +145,16 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # tentuin dataset_path
-    if Path(data_path).exists() and Path(data_path).is_dir():
-        dataset_path = find_dataset_file(data_path)
+    p = Path(data_path)
+    if p.exists() and p.is_dir():
+        dataset_path = find_dataset_file(str(p))
     else:
         dataset_path = data_path
 
     print(f"[INFO] Loading dataset from: {dataset_path}")
     df = load_df(dataset_path)
     print(f"[INFO] Dataset shape: {df.shape}")
+    print(f"[INFO] Columns: {list(df.columns)}")
 
     # resolve target col
     target_col = resolve_target_column(df, target_col)
@@ -143,7 +167,7 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     X = df.drop(columns=[target_col])
     y = df[target_col]
 
-    # bool -> int
+    # bool -> int (biar aman kalau ada bool di fitur)
     bool_cols = X.select_dtypes(include=["bool"]).columns
     if len(bool_cols) > 0:
         X[bool_cols] = X[bool_cols].astype(int)
@@ -155,9 +179,13 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=stratify
     )
+    print(f"[INFO] Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = [c for c in X.columns if c not in cat_cols]
+
+    print(f"[INFO] Categorical columns: {cat_cols}")
+    print(f"[INFO] Numerical columns: {num_cols}")
 
     numeric_transformer = Pipeline(
         steps=[("imputer", SimpleImputer(strategy="median"))]
@@ -179,31 +207,36 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     if problem_type == "classification":
         model = LogisticRegression(max_iter=1000)
+        print("[INFO] Using LogisticRegression (classification)")
     else:
         model = RandomForestRegressor(n_estimators=200, random_state=42)
+        print("[INFO] Using RandomForestRegressor (regression)")
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    # ✅ Kriteria 2: autolog umum (bukan mlflow.sklearn.autolog)
-    # ✅ Tanpa logging manual (tidak ada log_metric/log_param/log_artifact/set_tag)
+    # ✅ Kriteria 2: AUTLOG UMUM
+    # ❌ Tidak ada logging manual (log_param/log_metric/log_artifact/set_tag)
     mlflow.autolog()
 
     with get_or_create_run(experiment_name):
+        print("[INFO] Training started...")
         pipeline.fit(X_train, y_train)
+        print("[INFO] Training completed.")
 
-        # Simpan file model lokal (ini bukan logging ke MLflow, cuma file output)
+        # Simpan model ke folder output (bukan logging MLflow manual)
         model_path = out_dir / "model_pipeline.joblib"
         joblib.dump(pipeline, model_path)
+        print(f"[INFO] Model saved: {model_path}")
 
     print("Selesai training + autolog ke MLflow.")
     print("Jalankan MLflow UI: mlflow ui --port 5000")
-    print("Terus buka: http://127.0.0.1:5000")
+    print("Buka: http://127.0.0.1:5000")
     print(f"Output tersimpan di: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="namadataset_preprocessing")
+    parser.add_argument("--data_path", type=str, default=".")
     parser.add_argument("--out_dir", type=str, default="outputs")
     parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
     parser.add_argument("--experiment_name", type=str, default="kriteria2_basic_modelling")

@@ -107,7 +107,7 @@ def detect_problem_type(y: pd.Series) -> str:
     return "regression"
 
 
-def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
+def main(data_path: str, out_dir: str, target_col: str):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -177,7 +177,7 @@ def main(data_path: str, out_dir: str, target_col: str, experiment_name: str):
 
     pipeline = Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
-    mlflow.set_experiment(experiment_name) 
+    mlflow.set_tracking_uri("file:./mlruns")
     mlflow.autolog()
 
     print("[INFO] Training started...")
@@ -198,8 +198,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default=".")
     parser.add_argument("--out_dir", type=str, default="outputs")
-    parser.add_argument("--target_col", type=str, default=os.getenv("TARGET_COL", "math score").strip())
-    parser.add_argument("--experiment_name", type=str, default="kriteria2_basic_modelling")
+    parser.add_argument(
+        "--target_col",
+        type=str,
+        default=os.getenv("TARGET_COL", "math score").strip(),
+    )
     args = parser.parse_args()
 
     if not args.target_col:
@@ -214,5 +217,4 @@ if __name__ == "__main__":
         data_path=args.data_path,
         out_dir=args.out_dir,
         target_col=args.target_col,
-        experiment_name=args.experiment_name,
     )
